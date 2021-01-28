@@ -31,6 +31,10 @@ class RiemannError(Exception):
     pass
 
 
+class TransportError(Exception):
+    pass
+
+
 class Transport(object):
     """Abstract transport definition
 
@@ -69,6 +73,7 @@ class SocketTransport(Transport):
     def __init__(self, host=HOST, port=PORT):
         self.host = host
         self.port = port
+        self._socket = None
 
     @property
     def address(self):
@@ -81,7 +86,7 @@ class SocketTransport(Transport):
     @property
     def socket(self):
         """Returns the socket after checking it has been created"""
-        if not hasattr(self, '_socket'):
+        if self._socket is None:
             raise RuntimeError("Transport has not been connected!")
         return self._socket
 
@@ -89,22 +94,26 @@ class SocketTransport(Transport):
     def socket(self, value):
         self._socket = value
 
+    def disconnect(self):
+        """Closes the socket"""
+        self.socket.close()
+        self._socket = None
+
 
 class UDPTransport(SocketTransport):
     def connect(self):
         """Creates a UDP socket"""
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def disconnect(self):
-        """Closes the socket"""
-        self.socket.close()
-
     def send(self, message):
         """Sends a message, but does not return a response
 
         :returns: None - can't receive a response over UDP
         """
-        self.socket.sendto(message.SerializeToString(), self.address)
+        try:
+            self.socket.sendto(message.SerializeToString(), self.address)
+        except socket.error as e:
+            raise TransportError(str(e))
         return None
 
 
@@ -123,10 +132,6 @@ class TCPTransport(SocketTransport):
         """Connects to the given host"""
         self.socket = socket.create_connection(self.address, self.timeout)
 
-    def disconnect(self):
-        """Closes the socket"""
-        self.socket.close()
-
     def send(self, message):
         """Sends a message to a Riemann server and returns it's response
 
@@ -135,20 +140,23 @@ class TCPTransport(SocketTransport):
         :raises RiemannError: if the server returns an error
         """
         message = message.SerializeToString()
-        self.socket.sendall(struct.pack('!I', len(message)) + message)
+        try:
+            self.socket.sendall(struct.pack('!I', len(message)) + message)
 
-        length = struct.unpack('!I', self.socket.recv(4))[0]
-        response = riemann_client.riemann_pb2.Msg()
-        response.ParseFromString(socket_recvall(self.socket, length))
+            length = struct.unpack('!I', self.socket.recv(4))[0]
+            response = riemann_client.riemann_pb2.Msg()
+            response.ParseFromString(socket_recvall(self.socket, length))
 
-        if not response.ok:
-            raise RiemannError(response.error)
+            if not response.ok:
+                raise RiemannError(response.error)
 
-        return response
+            return response
+        except (socket.error, struct.error) as e:
+            raise TransportError(str(e))
 
 
 class TLSTransport(TCPTransport):
-    def __init__(self, host=HOST, port=PORT, timeout=TIMEOUT, ca_certs=None):
+    def __init__(self, host=HOST, port=PORT, timeout=TIMEOUT, ca_certs=None, keyfile=None, certfile=None):
         """Communicates with Riemann over TCP + TLS
 
         Options are the same as :py:class:`.TCPTransport` unless noted
@@ -157,12 +165,16 @@ class TLSTransport(TCPTransport):
         """
         super(TLSTransport, self).__init__(host, port, timeout)
         self.ca_certs = ca_certs
+        self.keyfile = keyfile
+        self.certfile = certfile
 
     def connect(self):
         """Connects using :py:meth:`TLSTransport.connect` and wraps with TLS"""
         super(TLSTransport, self).connect()
         self.socket = ssl.wrap_socket(
             self.socket,
+            keyfile=self.keyfile,
+            certfile=self.certfile,
             ssl_version=ssl.PROTOCOL_TLSv1,
             cert_reqs=ssl.CERT_REQUIRED,
             ca_certs=self.ca_certs)

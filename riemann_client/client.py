@@ -320,7 +320,7 @@ if RLock and Timer:  # noqa
                     self.connect()
                 try:
                     response = super(AutoFlushingQueuedClient, self).flush()
-                except socket.error:
+                except (socket.error, riemann_client.transport.TransportError):
                     # log and retry
                     logger.warn("Socket error on flushing. "
                                 "Attempting reconnect and retry...")
